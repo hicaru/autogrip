@@ -41,13 +41,6 @@ untouched.
 """
 
 
-bl_info = {
-    "name": "AutoGrip",
-    "blender": (3, 3, 0),
-    "category": "Object",
-    "description": "Automatically poses hands to grab props."
-}
-
 import bpy
 from bpy import context
 import mathutils
@@ -57,6 +50,25 @@ import math
 # I put this prefix on all the constraints and such I make with this add-on,
 # so that they're easy to locate and remove on a reset
 prefix = "AutoGrip_"
+
+# Bone collections that hold the control bones and the (hidden) projector bones
+control_collection = "AutoGrip Controls"
+projector_collection = "AutoGrip Projectors"
+
+
+def move_to_collection(bone, collection_name, visible):
+
+    # Puts a bone in exactly one bone collection, creating the collection if needed
+
+    collections = activeArmature.collections
+    target = collections.get(collection_name)
+    if target is None:
+        target = collections.new(collection_name)
+    target.is_visible = visible
+    for c in list(bone.collections):
+        if c != target:
+            c.unassign(bone)
+    target.assign(bone)
 
 
 makehuman_dictionary = {
@@ -82,8 +94,8 @@ rigify_dictionary = {
     "ORG-palm.03.L": ["f_ring.01.L", "f_ring.02.L", "f_ring.03.L"],
     "ORG-palm.04.L": ["f_pinky.01.L", "f_pinky.02.L", "f_pinky.03.L"],
         
-    "ORG-palm.01.R": ["f_index.01.R", "f_index.02.R", "f_index.02.R"],
-    "ORG-palm.02.R": ["f_middle.01.R", "f_middle.02.R", "f_middle.02.R"],
+    "ORG-palm.01.R": ["f_index.01.R", "f_index.02.R", "f_index.03.R"],
+    "ORG-palm.02.R": ["f_middle.01.R", "f_middle.02.R", "f_middle.03.R"],
     "ORG-palm.03.R": ["f_ring.01.R", "f_ring.02.R", "f_ring.03.R"],
     "ORG-palm.04.R": ["f_pinky.01.R", "f_pinky.02.R", "f_pinky.03.R"],
         
@@ -116,9 +128,7 @@ class fingerchain:
     name = ''
     
     prop = None
-    control_layer = 29
-    project_layer = 30
-    
+
     def __init__(self, boneslist, axis='x', name="Default", offset = 0.0):   # Use X as bend axis by default, unless
                                                # set otherwise on initiation
         print("Finger created")
@@ -375,58 +385,15 @@ class fingerchain:
             aim = obj.pose.bones[namestring]
             addIK(joint, aim)
                 
-    def clean_layers(self):
-        
-        # Moves all the project bones and the control bone to designated layers.
-    # You'd expect this to take an input, but I defined that out in 
-    # set_armature_layers instead. May rearrange that for some clarity
-        
-        for joint in self.projectors:
-            i = 0
-            joint.bone.layers[self.project_layer] = True
-            # Doing this in a weird order bc it won't let me set all layers to false
-            while (i < 32):
-                if self.project_layer != i:
-                    joint.bone.layers[i] = False
-                i = i+1
-        i = 0
-        self.control_bone.bone.layers[self.control_layer] = True
-        while (i<32):
-            if self.control_layer != i:
-                self.control_bone.bone.layers[i] = False
-            i = i+1
-    
     def set_armature_layers(self):
-        
-        rig_choice = bpy.props.EnumProperty(
-            name="Rig selection",
-            description="Select an option",
-            
-            items = [ 
-                ('MHX', "MHX", "MakeHuman Exchange"),
-                ('RFY', "Rigify", "Modular armature from the Rigify add-on"),
-                ('ARP', "AutoRig Pro", "Auto rig pro"),
-            ]
-        )
-    
-        rig_choice = obj.global_rig_choice
-        
-        if rig_choice == 'MHX':
-            if self.control_bone.name[-1] == 'R':
-                print("setting layer for RIGHT finger")
-                self.control_layer = 22
-            elif self.control_bone.name[-1] == 'L':
-                print("setting layer for LEFT finger")
-                self.control_layer = 6
-            self.project_layer = 24
-        elif rig_choice == 'RFY':
-            self.control_layer = 6
-            self.project_layer = 23
-        elif rig_choice == 'ARP':
-            self.control_layer = 16
-            self.project_layer = 16
-        self.clean_layers()
-            
+
+        # Moves the projector bones and the control bone into their own bone collections.
+        # Controls stay visible, projectors are hidden.
+
+        move_to_collection(self.control_bone.bone, control_collection, True)
+        for joint in self.projectors:
+            move_to_collection(joint.bone, projector_collection, False)
+
     def reconstruct(self):
         # When the finger already has a bonechain, finds projectors and control bone
         
@@ -534,20 +501,8 @@ def assemble_hand(handbone):
      
     # Returns a list of fingers
     
-    rig_choice = bpy.props.EnumProperty(
-        name="Rig selection",
-        description="Select an option",
-        
-        items = [ 
-            ('MHX', "MHX", "MakeHuman Exchange"),
-            ('RFY', "Rigify", "Modular armature from the Rigify add-on"),
-            ('ARP', "AutoRig Pro", "Auto rig pro"),
-            ('GUESS', "Best Guess", "Any armature this doesn't explicitly support. Unreliable"),
-        ]
-    )
-    
     rig_choice = obj.global_rig_choice
-    
+
     fingerlist = []
     fingerroots = []
     
@@ -581,6 +536,7 @@ def assemble_hand(handbone):
     for loop_palm in fingerroots:
         try:
             print()
+            newfinger = None
             bonechain = []
             
             nameslist = chosen_dictionary[loop_palm.name]
@@ -623,9 +579,11 @@ def assemble_hand(handbone):
                 else:
                     newfinger = fingerchain(bonechain, 'z', fingername)
             
+            if newfinger is None:
+                raise RuntimeError("no finger created")
             fingerlist.append(newfinger)
-        except:
-            print("\n",aloop_palm.name, "FINGER NOT FOUND.")
+        except Exception as e:
+            print("\n", loop_palm.name, "FINGER NOT FOUND:", repr(e))
         
     return fingerlist
 
@@ -669,24 +627,13 @@ def control_drivers(finger):
         v.targets[0].id = obj
         v.targets[0].data_path = 'pose.bones["' + finger.control_bone.name + '"].scale[0]'
         
-        scaledriver.expression = v.name + " * 0.005"
+        # Offset stays relative to the projector's length, same as create_single_shrinkwrap
+        scaledriver.expression = v.name + " * " + repr(0.15 * p.length)
 
 def find_hand_root(direction):
     
-    rig_choice = bpy.props.EnumProperty(
-        name="Rig selection",
-        description="Select an option",
-        
-        items = [ 
-            ('MHX', "MHX", "MakeHuman Exchange"),
-            ('RFY', "Rigify", "Modular armature from the Rigify add-on"),
-            ('ARP', "AutoRig Pro", "Auto rig pro"),
-            ('GUESS', "Best Guess", "Any armature this doesn't explicitly support. Unreliable"),
-        ]
-    )
-    
     rig_choice = obj.global_rig_choice
-    
+
     try:
         if rig_choice == 'MHX':
             if direction.lower() == 'l':
@@ -727,6 +674,27 @@ def setup_hand(targetroot):
         control_drivers(finger)
         finger.set_armature_layers()
 
+def _run_api(operator, context, call):
+    
+    # Operators are thin wrappers over api.py. Errors from the api become UI error reports.
+    
+    from . import api
+    try:
+        call(api, context.active_object)
+    except (RuntimeError, ValueError) as e:
+        operator.report({'ERROR'}, str(e))
+        return {'CANCELLED'}
+    return {'FINISHED'}
+
+def _selected_target(context):
+    
+    # First selected object that isn't the active armature
+    
+    for t in context.selected_objects:
+        if t != context.active_object:
+            return t
+    return None
+
 class AutoGripSetup(bpy.types.Operator):
     """Set up AutoGrip rig"""
     bl_idname = "object.autogrip_setup"
@@ -734,42 +702,7 @@ class AutoGripSetup(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        print("\n~~~~~~~~~~~START~~~~~~~~~~~~\n")
-
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        print("skeleton is " + activeArmature.name)
-            
-        lefthandroot = find_hand_root('L')
-        righthandroot = find_hand_root('R')
-        
-        r = l = True
-        
-        # There's gotta be a more elegant way to handle this setup, but I'm not
-        # seeing it at the moment, so I'll come back. TODO
-        
-        if (prefix + 'hand_L') in activeArmature:
-            if activeArmature[(prefix + 'hand_L')] == True:
-                print("Left hand already set up.")
-                l = False
-                
-        if (prefix + 'hand_R') in activeArmature:
-            if activeArmature[(prefix + 'hand_R')] == True:
-                print("Right hand already set up.")
-                r = False
-        
-        if l:
-            setup_hand(lefthandroot)
-            activeArmature[(prefix + 'hand_L')] = True
-        if r: 
-            setup_hand(righthandroot)
-            activeArmature[(prefix + 'hand_R')] = True
-        
-
-        return {'FINISHED'}
+        return _run_api(self, context, lambda api, arm: api.setup(arm, 'BOTH', arm.global_rig_choice))
             
             
 class AutoGripLeft(bpy.types.Operator):
@@ -779,32 +712,7 @@ class AutoGripLeft(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        print("\n~~~~~~~~~~~START~~~~~~~~~~~~\n")
-        
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        
-        print("skeleton is " + activeArmature.name)
-        
-        if (prefix + 'hand_L') in activeArmature:
-            if activeArmature[(prefix + 'hand_L')] == True:
-                print("Left hand already set up.")
-                return {'FINISHED'}
-            
-        # I'm gonna wrap this up better into a find_handroot function
-        
-        lefthandroot = find_hand_root('l')
-        
-        setup_hand(lefthandroot)
-        
-        activeArmature[(prefix + 'hand_L')] = True
-        
-        return {'FINISHED'}
-    
-
+        return _run_api(self, context, lambda api, arm: api.setup(arm, 'L', arm.global_rig_choice))
             
 class AutoGripRight(bpy.types.Operator):
     """Set up AutoGrip rig for right hand only"""
@@ -813,27 +721,7 @@ class AutoGripRight(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        print("\n~~~~~~~~~~~START~~~~~~~~~~~~\n")
-        
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        print("skeleton is " + activeArmature.name)
-        
-        if (prefix + 'hand_R') in activeArmature:
-            if activeArmature[(prefix + 'hand_R')] == True:
-                print("Right hand already set up.")
-                return {'FINISHED'}
-
-        righthandroot = find_hand_root('r')
-        
-        setup_hand(righthandroot)
-        
-        activeArmature[(prefix + 'hand_R')] = True
-        
-        return {'FINISHED'}
+        return _run_api(self, context, lambda api, arm: api.setup(arm, 'R', arm.global_rig_choice))
             
 class TargetLeft(bpy.types.Operator):
     """Set Grip Target for left hand"""
@@ -842,34 +730,11 @@ class TargetLeft(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        
-        #print(obj.name)
-        
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        print("skeleton is " + activeArmature.name)
-        
-        target = None
-
-        lefthandroot = find_hand_root('L')
-
-        for t in bpy.context.selected_objects:
-            if t != obj:
-                target = t
-                break
-        print("Grip target is " + target.name)
-        
-        left_hand_list = assemble_hand(lefthandroot)
-        
-        for i in left_hand_list:
-            i.reconstruct()
-            print("set target for left hand finger " + i.name)
-            i.target_shrinkwraps(target)
-        
-        return {'FINISHED'}
+        target = _selected_target(context)
+        if target is None:
+            self.report({'ERROR'}, "Select the target mesh as well as the armature.")
+            return {'CANCELLED'}
+        return _run_api(self, context, lambda api, arm: api.set_target(arm, target, 'L'))
     
 class TargetRight(bpy.types.Operator):
     """Set Grip Target for right hand"""
@@ -878,37 +743,14 @@ class TargetRight(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        
-        #print(obj.name)
-        
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        print("skeleton is " + activeArmature.name)
-        
-        target = None
-
-        righthandroot = find_hand_root('R')
-
-        for t in bpy.context.selected_objects:
-            if t != obj:
-                target = t
-                break
-        print("Grip target is " + target.name)
-        
-        right_hand_list = assemble_hand(righthandroot)
-        
-        for i in right_hand_list:
-            i.reconstruct()
-            print("set target for right hand finger " + i.name)
-            i.target_shrinkwraps(target)
-        
-        return {'FINISHED'}
+        target = _selected_target(context)
+        if target is None:
+            self.report({'ERROR'}, "Select the target mesh as well as the armature.")
+            return {'CANCELLED'}
+        return _run_api(self, context, lambda api, arm: api.set_target(arm, target, 'R'))
 
 
-def reset_hand(wristroot):
+def reset_hand(wristroot, reset_pose=True):
     
     global obj 
     obj = bpy.context.active_object
@@ -924,20 +766,24 @@ def reset_hand(wristroot):
     
     for f in fingers_list:
             for p in f.phalanges:
-                for c in p.constraints:
+                for c in list(p.constraints):
                     if prefix in c.name:
-                        """drivercurves = c.influence.drivers
-                        for d in drivercurves:
-                            drivercurves.remove(drivercurves[0])"""
                         obj.driver_remove('pose.bones["' + p.name + '"].constraints["' + c.name + '"].influence')
-                        # Exception may be thrown here if bone does not have constraint
                         p.constraints.remove(c)   
             for j in f.projectors:
-                for c in j.constraints:
+                for c in list(j.constraints):
                     if prefix in c.name:
                         obj.driver_remove('pose.bones["' + j.name + '"].constraints["' + c.name + '"].distance')
-                        # Exception may be thrown if bone does not have constraint
                         # No point in removing the constraint because I'll delete the whole bone
+            
+            if reset_pose:
+                # Quick Pose and grip rotate the phalanges and the thumb root, so put those back
+                posed = list(f.phalanges)
+                if 'thumb' in f.name:
+                    posed.append(f.palmroot)
+                for pb in posed:
+                    pb.rotation_euler = (0.0, 0.0, 0.0)
+                    pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
                         
     print('entering edit mode')
     bpy.ops.object.mode_set(mode='EDIT', toggle=False)
@@ -950,8 +796,8 @@ def reset_hand(wristroot):
             try:
                 projectorname = j.name
                 ebs.remove(ebs[projectorname])
-            except:
-                print("!!! failed to delete " + j.name)
+            except Exception as e:
+                print("!!! failed to delete projector:", repr(e))
         
     print("deleting control bones")
     for f in fingers_list:
@@ -961,8 +807,8 @@ def reset_hand(wristroot):
         try:
             controlname = f.control_bone.name
             ebs.remove(ebs[controlname])
-        except:
-            print("!!! failed to delete " + f.control_bone.name)
+        except Exception as e:
+            print("!!! failed to delete control bone:", repr(e))
     
     print('entering object mode')
     bpy.ops.object.mode_set(mode='OBJECT', toggle=False)       
@@ -974,23 +820,7 @@ class ResetHandLeft(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
-        print("resetting left hand")
-        
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        
-        lefthandroot  = find_hand_root('L')
-        
-        print("left hand is " + lefthandroot.name)
-        
-        reset_hand(lefthandroot)
-        
-        activeArmature[(prefix + 'hand_L')] = False
-        
-        return {'FINISHED'}
+        return _run_api(self, context, lambda api, arm: api.reset(arm, 'L'))
     
 class ResetHandRight(bpy.types.Operator):
     """Reset all autogrip stuff on right hand"""
@@ -999,135 +829,57 @@ class ResetHandRight(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
-        print("resetting right hand")
-        
-        global obj 
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        
-        #righthandroot = obj.pose.bones['hand0.R']
-        righthandroot = find_hand_root('R')
-        
-        print("right hand is " + righthandroot.name)
-        
-        reset_hand(righthandroot)
-        
-        activeArmature[(prefix + 'hand_R')] = False
-        
-        return {'FINISHED'}
+        return _run_api(self, context, lambda api, arm: api.reset(arm, 'R'))
+
+# Thumb positions used by Quick Pose, per rig type: (bone name or prefix, left values, right values).
+# MHX and ARP use euler rotation, Rigify uses quaternions.
+thumb_presets = {
+    'MHX': ('thumb.01.{}', (0.43, 0.27, 0.32), (0.43, -0.27, -0.17)),
+    'RFY': ('ORG-thumb.01', (0.85, -0.114, 0.36, 0.36), (0.85, -0.114, -0.36, -0.36)),
+    'ARP': ('c_thumb1_base.{}', (1.62, 0, -0.3), (1.62, 0, 0.3)),
+}
+
+def apply_thumb_preset(handroot, direction):
     
+    # Guesses an opposable thumb position for the hand under handroot
+    
+    rig_choice = obj.global_rig_choice
+    name, left, right = thumb_presets[rig_choice]
+    if rig_choice == 'ARP':
+        name = name.format(direction.lower())
+    else:
+        name = name.format(direction.upper())
+    values = left if direction.upper() == 'L' else right
+    
+    for bone in handroot.children_recursive:
+        matches = (bone.name == name) if rig_choice == 'ARP' else (name in bone.name)
+        if matches:
+            if rig_choice == 'RFY':
+                bone.rotation_mode = 'QUATERNION'
+                bone.rotation_quaternion = values
+            else:
+                bone.rotation_mode = 'XYZ'
+                bone.rotation_euler = values
+
+def close_hand_fully(direction, thumb=True):
+    
+    # Quick Pose for one hand: every control bone to 90 degrees, plus the thumb guess
+    
+    handroot = find_hand_root(direction)
+    for bone in handroot.children_recursive:
+        if 'control' in bone.name:
+            bone.rotation_euler[0] = math.pi / 2
+    if thumb:
+        apply_thumb_preset(handroot, direction)
+
 class QuickPose(bpy.types.Operator):
     """Quickly put all control bones to active position"""
     bl_idname = "object.autogrip_quickpose"
     bl_label = "Quick Pose"
     bl_options = {'REGISTER', 'UNDO'}
     
-    rig_choice = bpy.props.EnumProperty(
-        name="Rig selection",
-        description="Select an option",
-        
-        items = [ 
-            ('MHX', "MHX", "MakeHuman Exchange"),
-            ('RFY', "Rigify", "Modular armature from the Rigify add-on"),
-            ('ARP', "AutoRig Pro", "Auto rig pro"),
-            ('GUESS', "Best Guess", "Any armature this doesn't explicitly support. Unreliable"),
-        ]
-    )
-    
-    # This here is also depending on rig choice! Be wary
-    
     def execute(self, context):
-        print("Quickpose")
-        
-        pi = 3.14159
-        
-        global obj
-        obj = bpy.context.active_object
-        
-        global activeArmature
-        activeArmature = bpy.context.active_object.data
-        
-        rig_choice = obj.global_rig_choice
-        
-        if ((prefix + 'hand_L') in activeArmature) and (activeArmature[(prefix + 'hand_L')]):
-            #if activeArmature[(prefix + 'hand_L')] == True:
-             #   print('hand actually set up')
-            
-            print("left hand set up")
-            lefthandroot = find_hand_root('L')
-            
-            for bone in lefthandroot.children_recursive:
-                if 'control' in bone.name:
-                    bone.rotation_euler[0] = pi/2 
-                    continue
-                if rig_choice == 'MHX':
-                    if 'thumb.01.L' in bone.name:
-                        
-                        print("quickpose mhx thumb LEFT")
-                            # Set this to only affect axes that are not locked!
-                        bone.rotation_euler[0] = 0.43
-                        bone.rotation_euler[1] = 0.27
-                        bone.rotation_euler[2] = 0.32
-                                  
-                elif rig_choice == 'RFY':
-                    if 'ORG-thumb.01' in bone.name:
-                        print("quickpose rigify thumb LEFT")
-                        bone.rotation_quaternion[0] = 0.85
-                        bone.rotation_quaternion[1] = -0.114
-                        bone.rotation_quaternion[2] = 0.36
-                        bone.rotation_quaternion[3] = 0.36
-                        
-                elif rig_choice == 'ARP':
-                    if bone.name == 'c_thumb1_base.l':
-                        print("quickpose autorig pro thumb LEFT")
-                    
-                        bone.rotation_euler[0] = 1.62
-                        bone.rotation_euler[1] = 0
-                        bone.rotation_euler[2] = -0.3
-                    
-        else:
-            print('left hand not set up')
-            
-            
-        if ((prefix + 'hand_R') in activeArmature) and (activeArmature[(prefix + 'hand_R')] == True):
-        
-            print('right hand set up')            
-            righthandroot = find_hand_root('R')
-            
-            for bone in righthandroot.children_recursive:
-                if 'control' in bone.name:
-                    bone.rotation_euler[0] = pi/2
-                    continue
-                
-                if rig_choice == 'MHX':
-                    if 'thumb.01.R' in bone.name: 
-                        print("quickpose mhx thumb RIGHT")
-                        bone.rotation_euler[0] = 0.43
-                        bone.rotation_euler[1] = -0.27
-                        bone.rotation_euler[2] = -0.17
-                                  
-                elif rig_choice == 'RFY':
-                    if 'ORG-thumb.01' in bone.name:
-                        print("quickpose rigify thumb RIGHT")
-                        bone.rotation_quaternion[0] = 0.85
-                        bone.rotation_quaternion[1] = -0.114
-                        bone.rotation_quaternion[2] = -0.36
-                        bone.rotation_quaternion[3] = -0.36
-                        
-                elif rig_choice == 'ARP':
-                    
-                    if bone.name == 'c_thumb1_base.r':
-                        print("quickpose autorig pro thumb RIGHT")
-                    
-                        bone.rotation_euler[0] = 1.62
-                        bone.rotation_euler[1] = -0
-                        bone.rotation_euler[2] = 0.3
-        else:
-            print('right hand not set up')
-            
-        return {'FINISHED'}
+        return _run_api(self, context, lambda api, arm: api.quick_pose(arm, 'BOTH'))
         
 class github_link(bpy.types.Operator):
     
@@ -1138,7 +890,6 @@ class github_link(bpy.types.Operator):
     def execute(self, context):
         
         import webbrowser
-        import imp
         webbrowser.open("https://github.com/Jetpack-Crow/autogrip")  
         
         return {'FINISHED'}
@@ -1152,7 +903,6 @@ class kofi_link(bpy.types.Operator):
     def execute(self, context):
         
         import webbrowser
-        import imp
         webbrowser.open("https://ko-fi.com/jetpackcrow")  
         
         return {'FINISHED'}
@@ -1329,14 +1079,11 @@ def register():
         description="Select an option",
         
         items = [ 
-            ('MHX', "MHX", "MakeHuman Exchange\n" + 
-            "Puts control bones on layers 7 and 23 for Fingers" +
-            "\nPuts projectors on layer 24"),
-            ('RFY', "Rigify", "Modular armature from the Rigify add-on.\n" + 
-            "Puts control bones on layer 6 for Fingers (Detail)\n" + 
-            "Puts projectors on layer 23"),
-            ('ARP', "Auto-Rig Pro", "Armature from the Auto-Rig Pro add-on.\n" + 
-            "Puts control bones and projectors on layer 16")
+            ('MHX', "MHX", "MakeHuman Exchange"),
+            ('RFY', "Rigify", "Modular armature from the Rigify add-on"),
+            ('ARP', "Auto-Rig Pro", "Armature from the Auto-Rig Pro add-on")
+            # Control bones go to the \"AutoGrip Controls\" bone collection, projectors to
+            # the hidden \"AutoGrip Projectors\" one.
             #('GUESS', "Best Guess", "This will do its best to reconstruct some hands from\n" + 
             #"any given armature. Not implemented yet"),
         ]

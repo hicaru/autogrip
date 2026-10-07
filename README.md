@@ -2,9 +2,34 @@
 
 This is a helpful little tool for hand rigs that lets them automatically grab onto mesh props. So far the types of rig it works on are MakeHuman Exchange, Rigify, and Auto-Rig Pro, but I'm taking requests for other common rig types and I'm working on adding a "custom" option. 
 
-# Tutorial
+# Installation
 
-Run "autogrip.py" in Blender's text editor or install it as an add-on through the preferences menu. Once that's done, check object mode, and all the buttons you need are in a tab in the N-panel called "AutoGrippy."
+Requires Blender 5.2 or newer.
+
+1. Download this repository as a ZIP (GitHub: **Code > Download ZIP**, or a release ZIP). Don't unzip it.
+2. In Blender: **Edit > Preferences > Get Extensions**, open the dropdown arrow (top right) and choose **Install from Disk...**, then pick the ZIP.
+3. Make sure **AutoGrip** is enabled in the list.
+4. In the 3D viewport press **N**, and you'll find an **AutoGrip** tab in the sidebar (object mode, with an armature active).
+
+Developing from a git checkout: name the folder `autogrip` and symlink it into your user extensions folder (`<Blender config>/extensions/user_default/autogrip`), or run `blender --command extension build` inside it to produce an installable ZIP.
+
+# Using it with an AI agent (Blender MCP)
+
+AutoGrip has a scripting API (`api.py`) so an agent connected to Blender through an MCP server can grip things without clicking. The agent finds out about it from a skill:
+
+1. Copy `skills/blender-autogrip` into your agent's skills folder (for Claude Code: `~/.claude/skills/` or `<project>/.claude/skills/`). `AGENTS.md` carries the short version for other agents.
+2. Connect your Blender MCP server (it must offer an execute-Python tool) and ask for something like "make the right hand hold the cup".
+3. The agent runs, inside Blender:
+
+```python
+import importlib
+api = importlib.import_module("bl_ext.user_default.autogrip.api")   # "autogrip.api" for a legacy add-on install
+api.auto_grip("Armature", "Cup", side="R")
+```
+
+Main calls: `setup`, `set_target`, `grip` (stops each finger at contact with the target), `release`, `reset`, `status`, `quick_pose`, `auto_grip`. See the docstrings in `api.py` or `skills/blender-autogrip/SKILL.md`.
+
+# Tutorial
 
 With the armature you want to use selected, you can pick which type of rig it is from the drop-down. Formats supported so far are MakeHuman Exchange, Rigify, and Auto-Rig Pro. 
 
@@ -13,7 +38,7 @@ If it's not a model you made and you're not 100% sure, you can use "Guess Rig Ty
 Click "setup" to assemble both hands, or just "Setup Right" or "Setup Left" if you don't need both (or your model doesn't have both).
 
 It'll take about 20-30 seconds, during which a lot of my debug notes will print in the system console. Let that finish, and you'll have a tangle of small needley bones sticking off the hands, but the pose won't change yet. 
-(If you don't seem to have the small needley bones, check the tooltip for the rig type you chose and make sure you can actually see the layer where it left them.)
+(The control bones are put in a bone collection called "AutoGrip Controls". The needley projector bones are in "AutoGrip Projectors", which is hidden; turn it on in the Armature properties if you want to see them.)
 
 The influence of the contraints depends on the rotation of the control bones - those are the longer ones that stick out from the knuckles. If they're at rest, pointing out from the back of the hand, it's 0%. If they're rotated 90 degrees on their local X axis, so they jab forward over the fingers like Wolverine claws, it's 100%.
 

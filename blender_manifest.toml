@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "autogrip"
+version = "1.3.0"
+name = "AutoGrip"
+tagline = "Automatically poses hand rigs to grip props"
+maintainer = "Jetpack Crow"
+type = "add-on"
+website = "https://github.com/Jetpack-Crow/autogrip"
+
+blender_version_min = "5.2.0"
+
+license = ["SPDX:MIT"]
+copyright = ["2021 Jetpack-Crow"]

@@ -6,17 +6,19 @@
 bl_info = {
     "name": "Autogrip",
     "author": "Jetpack Crow",
-    "version": (1, 21),
-    "blender": (3, 4, 1),
-    "location": "View3D > Extended Tools > AutoGrip",
+    "version": (1, 3, 0),
+    "blender": (5, 2, 0),
+    "location": "View3D > Sidebar > AutoGrip",
     "description": "Automatically poses hand rigs",
     "category": '3D View'}
 if "bpy" in locals():
-    import imp
-    imp.reload(handrig)
+    import importlib
+    importlib.reload(handrig)
+    importlib.reload(api)
     print("Reloaded Autogrip")
 else:
     from . import handrig
+    from . import api
     print("Imported Autogrip") 
 
 
