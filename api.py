@@ -14,7 +14,7 @@ from mathutils.bvhtree import BVHTree
 from . import handrig as hr
 
 SIDES = ('L', 'R')
-RIG_TYPES = {'MHX': hr.makehuman_dictionary, 'RFY': hr.rigify_dictionary, 'ARP': hr.autorig_dictionary}
+RIG_TYPES = {'MHX': hr.makehuman_dictionary, 'RFY': hr.rigify_dictionary, 'ARP': hr.autorig_dictionary, 'FPS': hr.fps_dictionary, 'GEN': {}}
 
 
 def _object(ref, kind):
@@ -31,12 +31,10 @@ def _object(ref, kind):
 def _activate(armature):
     # handrig.py works on module globals and bpy.ops, so bind them to this armature
     arm = _object(armature, 'ARMATURE')
-    if bpy.context.object is not None and bpy.context.object.mode != 'OBJECT':
+    if getattr(bpy.context, 'object', None) is not None and bpy.context.object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
     bpy.context.view_layer.objects.active = arm
     arm.select_set(True)
-    hr.obj = arm
-    hr.activeArmature = arm.data
     return arm
 
 
@@ -59,7 +57,7 @@ def _is_setup(arm, side):
 
 def _fingers(arm, side):
     # Rebuilds the finger chains of an already set up hand
-    fingers = hr.assemble_hand(hr.find_hand_root(side))
+    fingers = hr.assemble_hand(arm, hr.find_hand_root(arm, side))
     for f in fingers:
         f.reconstruct()
     return [f for f in fingers if f.control_bone is not None]
@@ -104,7 +102,7 @@ def setup(armature, side='BOTH', rig_type='AUTO'):
             skipped[s] = "already set up"
             continue
         try:
-            hr.setup_hand(hr.find_hand_root(s))
+            hr.setup_hand(arm, hr.find_hand_root(arm, s))
         except RuntimeError as e:
             if side.upper() != 'BOTH':
                 raise
@@ -177,7 +175,7 @@ def grip(armature, side='BOTH', amount=1.0, contact=True, thumb=True, tolerance=
 
         fingers = _fingers(arm, s)
         if thumb:
-            hr.apply_thumb_preset(hr.find_hand_root(s), s)
+            hr.apply_thumb_preset(arm, hr.find_hand_root(arm, s), s)
         out = {}
         for f in fingers:
             cb = f.control_bone
@@ -210,6 +208,43 @@ def release(armature, side='BOTH'):
     return {"released": opened}
 
 
+
+def fix_bone_rolls(armature, side='BOTH'):
+    """Fixes bone rolls for the defined finger bones of the hand(s)."""
+    arm = _activate(armature)
+    fixed = []
+    
+    if arm.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+    for s in _sides(side):
+        try:
+            root = hr.find_hand_root(arm, s)
+        except RuntimeError:
+            continue
+            
+        fingers = hr.assemble_hand(arm, root)
+        
+        bone_names = []
+        for f in fingers:
+            bone_names.append(f.palmroot.name)
+            for pb in f.phalanges:
+                bone_names.append(pb.name)
+                
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.armature.select_all(action='DESELECT')
+        
+        for name in bone_names:
+            if name in arm.data.edit_bones:
+                arm.data.edit_bones[name].select = True
+                
+        bpy.ops.armature.calculate_roll(type='GLOBAL_POS_Z')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        fixed.append(s)
+        
+    return {"fixed_rolls": fixed}
+
 def auto_grip(armature, target, side='BOTH', rig_type='AUTO', **grip_options):
     """One call: sets up the hand(s) if needed, targets the mesh and closes the fingers on it."""
     arm = _activate(armature)
@@ -231,7 +266,7 @@ def reset(armature, side='BOTH', reset_pose=True):
     for s in _sides(side):
         if not _is_setup(arm, s):
             continue
-        hr.reset_hand(hr.find_hand_root(s), reset_pose)
+        hr.reset_hand(arm, hr.find_hand_root(arm, s), reset_pose)
         arm.data[_flag(arm, s)] = False
         if hr.prefix + 'target_' + s in arm.data:
             del arm.data[hr.prefix + 'target_' + s]

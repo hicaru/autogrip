@@ -56,11 +56,11 @@ control_collection = "AutoGrip Controls"
 projector_collection = "AutoGrip Projectors"
 
 
-def move_to_collection(bone, collection_name, visible):
+def move_to_collection(obj, bone, collection_name, visible):
 
     # Puts a bone in exactly one bone collection, creating the collection if needed
 
-    collections = activeArmature.collections
+    collections = obj.data.collections
     target = collections.get(collection_name)
     if target is None:
         target = collections.new(collection_name)
@@ -103,6 +103,20 @@ rigify_dictionary = {
     "ORG-thumb.01.R": ["thumb.02.R", "thumb.03.R"]
 }
     
+
+fps_dictionary = {
+    "Bone_L.016": ["Bone_L.017", "Bone_L.018", "Bone_L.019"],
+    "Bone_L.008": ["Bone_L.013", "Bone_L.014", "Bone_L.015"],
+    "Bone_L.009": ["Bone_L.010", "Bone_L.011", "Bone_L.012"],
+    "Bone_L.004": ["Bone_L.005", "Bone_L.006", "Bone_L.007"],
+    "Bone_L.020": ["Bone_L.021", "Bone_L.022"],
+    "Bone_R.016": ["Bone_R.017", "Bone_R.018", "Bone_R.019"],
+    "Bone_R.008": ["Bone_R.013", "Bone_R.014", "Bone_R.015"],
+    "Bone_R.009": ["Bone_R.010", "Bone_R.011", "Bone_R.012"],
+    "Bone_R.004": ["Bone_R.005", "Bone_R.006", "Bone_R.007"],
+    "Bone_R.020": ["Bone_R.021", "Bone_R.022"]
+}
+
 autorig_dictionary = {
     'c_index1_base.l': ['c_index1.l', 'c_index2.l', 'c_index3.l'],        
     'c_middle1_base.l': ['c_middle1.l', 'c_middle2.l', 'c_middle3.l'],        
@@ -118,6 +132,7 @@ autorig_dictionary = {
 }
 
 class fingerchain:
+    obj = None
     phalanges = []
     control_bone = None
     axis = ''
@@ -129,9 +144,10 @@ class fingerchain:
     
     prop = None
 
-    def __init__(self, boneslist, axis='x', name="Default", offset = 0.0):   # Use X as bend axis by default, unless
+    def __init__(self, obj, boneslist, axis='x', name="Default", offset = 0.0):   # Use X as bend axis by default, unless
                                                # set otherwise on initiation
         print("Finger created")
+        self.obj = obj
         self.phalanges = boneslist
         self.axis = axis
         self.offset = offset
@@ -183,8 +199,8 @@ class fingerchain:
         # If it creates the control bones and tries to parent them to the hand when
         # the model is in a pose, they end up offset. Still function correctly,
         # but I'm putting it to rest position real quick to avoid that.
-        prev_position = activeArmature.pose_position
-        activeArmature.pose_position = 'REST'
+        prev_position = self.obj.data.pose_position
+        self.obj.data.pose_position = 'REST'
         
         print("Creating control bone for finger " + self.name)
         
@@ -195,7 +211,7 @@ class fingerchain:
         postfix = palmroot_name[-1]
         
         bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-        ebs = obj.data.edit_bones
+        ebs = self.obj.data.edit_bones
         
         control = ebs.new("control_" + self.name + '.' + postfix)
         
@@ -231,7 +247,7 @@ class fingerchain:
 
         control.tail = loc
         
-        control.parent = name_to_editbone(self.palmroot.name)
+        control.parent = name_to_editbone(self.obj, self.palmroot.name)
         
         control.use_deform = False
         
@@ -241,9 +257,9 @@ class fingerchain:
         
         bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
         
-        self.control_bone = name_to_posebone(stringholder)
+        self.control_bone = name_to_posebone(self.obj, stringholder)
         
-        activeArmature.pose_position = prev_position
+        self.obj.data.pose_position = prev_position
         
     def create_projectors(self):    
         # Creates projectors, does not set up constraints
@@ -256,12 +272,12 @@ class fingerchain:
         palmroot = self.palmroot
         
         bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-        ebs = obj.data.edit_bones
+        ebs = self.obj.data.edit_bones
         
         editchain = []
         
         for posebone in chain[:]:
-            namematch = name_to_editbone(posebone.name)
+            namematch = name_to_editbone(self.obj, posebone.name)
             editchain.append(namematch)
             
         """
@@ -282,7 +298,7 @@ class fingerchain:
         bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
                 
         for newprojector in nameslist:
-            posematch = name_to_posebone(newprojector)
+            posematch = name_to_posebone(self.obj, newprojector)
             self.projectors.append(posematch)
             #print(newprojector + " added to " + self.name + " projectors list")
             
@@ -341,7 +357,7 @@ class fingerchain:
                 if j.name in p:
                     #print("projector " + p.name + " to fingerbone " + j.name)
                     fingertiplock = p.constraints.new("DAMPED_TRACK")
-                    fingertiplock.target = obj
+                    fingertiplock.target = self.obj
                     fingertiplock.subtarget = j.name
                     fingertiplock.head_tail = 1.0
                     fingertiplock.name = prefix + "Damped Track"
@@ -382,19 +398,20 @@ class fingerchain:
         
         for joint in self.phalanges:
             namestring = "projector_" + joint.name
-            aim = obj.pose.bones[namestring]
-            addIK(joint, aim)
+            aim = self.obj.pose.bones[namestring]
+            addIK(self.obj, joint, aim)
                 
     def set_armature_layers(self):
 
         # Moves the projector bones and the control bone into their own bone collections.
         # Controls stay visible, projectors are hidden.
 
-        move_to_collection(self.control_bone.bone, control_collection, True)
+        move_to_collection(self.obj, self.control_bone.bone, control_collection, True)
         for joint in self.projectors:
-            move_to_collection(joint.bone, projector_collection, False)
+            move_to_collection(self.obj, joint.bone, projector_collection, False)
 
     def reconstruct(self):
+        obj = self.obj
         # When the finger already has a bonechain, finds projectors and control bone
         
         direction_char = self.palmroot.name[-1]
@@ -414,7 +431,7 @@ class fingerchain:
             print("relocate control")
             stringcontrol = "control_" + self.name + '.' + direction_char
             try: 
-                self.control_bone = obj.pose.bones[stringcontrol]
+                self.control_bone = self.obj.pose.bones[stringcontrol]
                 print("found control bone, name " + self.control_bone.name)
                 #break
             except:
@@ -426,11 +443,11 @@ class fingerchain:
 # These are honestly unnecessary but I thought I needed them at one point. Will clean it up
 # to remove them later because they're literally one line
     
-def name_to_editbone(key):
+def name_to_editbone(obj, key):
     return obj.data.edit_bones[key]
-def name_to_bone(key):
+def name_to_bone(obj, key):
     return obj.data.bones[key]
-def name_to_posebone(key):
+def name_to_posebone(obj, key):
     return obj.pose.bones[key]
     
     
@@ -458,7 +475,7 @@ def rotate_around(source, rotationaxis, offset):
     vector_arr = mathutils.Vector(tuple(arr))
     return vector_arr    
 
-def addIK(posebone, target):
+def addIK(obj, posebone, target):
     
     #Hooks the designated posebone up with an IK constraint to the designated target,
     #with chain count set to 1 and iterations to 16 to keep down memory issues
@@ -493,7 +510,7 @@ def create_single_shrinkwrap(projectorbone):
     #setting distance relative to bone length for the moment. Not perfect but it will do
     newProject.distance = 0.15 * projectorbone.length 
         
-def assemble_hand(handbone):
+def assemble_hand(obj, handbone):
     
     # Puts likely finger bones together in chains, 
     # then makes basic fingers out of them. Most of the rewriting to let this work on 
@@ -516,16 +533,49 @@ def assemble_hand(handbone):
         chosen_dictionary = rigify_dictionary
     elif rig_choice == "ARP":
         chosen_dictionary = autorig_dictionary
+    elif rig_choice == "FPS":
+        chosen_dictionary = fps_dictionary
+    elif rig_choice == "GEN":
+        # Traverse children to find all chains ending in tip-bones. Filter for chains of length >= 2.
+        chains = []
+        def traverse(bone, current_chain):
+            current_chain.append(bone)
+            if not bone.children:
+                if len(current_chain) >= 2:
+                    chains.append(list(current_chain))
+            else:
+                for child in bone.children:
+                    if prefix not in child.name and not child.name.startswith("control_") and not child.name.startswith("projector_"):
+                        traverse(child, current_chain)
+            current_chain.pop()
         
+        for child in handbone.children:
+            traverse(child, [])
+            
+        # Sort chains by relative Y or X coordinates.
+        # We can use the root of each chain's head_local position relative to the handbone
+        # Actually, sorting by `head_local.y` or `head_local.x`. Wait, we just sort by their head_local position relative to the handbone.
+        def get_local_coord(bone):
+            # handbone matrix is in armature space.
+            # handbone.matrix.inverted() @ bone.head
+            return (handbone.matrix.inverted() @ bone[0].head).x
+        chains.sort(key=get_local_coord)
+        
+        chosen_dictionary = {}
+        for chain in chains:
+            root_name = chain[0].name
+            chosen_dictionary[root_name] = [b.name for b in chain[1:]]
+
     print("choice = " + rig_choice)
     direction = handbone.name[-1]
     
-    
     for key in chosen_dictionary:
-        if key[-1] == direction:
+        if key.endswith(direction) or f"_{direction}" in key or f".{direction}" in key or rig_choice == 'GEN':
             print("# " + key)
-            fingerroots.append(obj.pose.bones[key])     
-            
+            if key in obj.pose.bones:
+                fingerroots.append(obj.pose.bones[key])
+            else:
+                print(f"Warning: {key} not found in bones")
     # And then THIS assembles the fingers off each palm. I've got a dictionary set up 
     # that tells it the whole list of fingers it should be looking for for 
     # each rig type. Elegant? No. Fast? Yes
@@ -557,27 +607,30 @@ def assemble_hand(handbone):
                 if rig_choice == 'MHX':
                     if bonechain[0].name == "thumb.02.L":
                         print("\nCREATING LEFT MAKEHUMAN THUMB")
-                        newfinger = fingerchain(bonechain, 'z', fingername, 0.8)
+                        newfinger = fingerchain(obj, bonechain, 'z', fingername, 0.8)
                     elif bonechain[0].name ==  "thumb.02.R":
                         print("\nCREATING RIGHT MAKEHUMAN THUMB")
-                        newfinger = fingerchain(bonechain, 'z', fingername, -0.8)
+                        newfinger = fingerchain(obj, bonechain, 'z', fingername, -0.8)
                 elif rig_choice == 'RFY':
                     if bonechain[0].name == "thumb.02.L":
                         print("\nCREATING LEFT RIGIFY THUMB")
-                        newfinger = fingerchain(bonechain, 'z', fingername, -0.7)
+                        newfinger = fingerchain(obj, bonechain, 'z', fingername, -0.7)
                     elif bonechain[0].name ==  "thumb.02.R":
                         print("\nCREATING RIGHT RIGIFY THUMB")
-                        newfinger = fingerchain(bonechain, 'z', fingername, 0.7)
+                        newfinger = fingerchain(obj, bonechain, 'z', fingername, 0.7)
                 elif rig_choice == 'ARP':
                     print("\nCREATING AUTORIG THUMB")
-                    newfinger = fingerchain(bonechain, '-z', fingername)
+                    newfinger = fingerchain(obj, bonechain, '-z', fingername)
+                elif rig_choice in ('FPS', 'GEN'):
+                    print("\nCREATING FPS/GEN THUMB")
+                    newfinger = fingerchain(obj, bonechain, 'z', fingername)
                     
             else:
                 print("creating other finger")
                 if rig_choice == 'ARP':
-                    newfinger = fingerchain(bonechain, '-z', fingername)
+                    newfinger = fingerchain(obj, bonechain, '-z', fingername)
                 else:
-                    newfinger = fingerchain(bonechain, 'z', fingername)
+                    newfinger = fingerchain(obj, bonechain, 'z', fingername)
             
             if newfinger is None:
                 raise RuntimeError("no finger created")
@@ -587,7 +640,7 @@ def assemble_hand(handbone):
         
     return fingerlist
 
-def control_drivers(finger):
+def control_drivers(obj, finger):
     
     # Puts rotation limits on control bone, then hooks up the influence of all those IK constraints
     # to depend on control bone rotation. Maybe the rotation limit part should be somewhere else
@@ -630,7 +683,7 @@ def control_drivers(finger):
         # Offset stays relative to the projector's length, same as create_single_shrinkwrap
         scaledriver.expression = v.name + " * " + repr(0.15 * p.length)
 
-def find_hand_root(direction):
+def find_hand_root(obj, direction):
     
     rig_choice = obj.global_rig_choice
 
@@ -650,6 +703,16 @@ def find_hand_root(direction):
                 return obj.pose.bones['hand.r']
             elif direction.lower() == 'l':
                 return obj.pose.bones['hand.l']
+        elif rig_choice == 'GEN':
+            for pb in obj.pose.bones:
+                if 'hand' in pb.name.lower():
+                    if pb.name.endswith(direction) or f"_{direction}" in pb.name or f".{direction}" in pb.name or f" {direction}" in pb.name:
+                        return pb
+        elif rig_choice == 'FPS':
+            if direction.lower() == 'l':
+                return obj.pose.bones['Hand L']
+            elif direction.lower() == 'r':
+                return obj.pose.bones['Hand R']
     except:
         # I'm trying to figure out how to report a more elegant error to the user if they're
         # on the wrong rig, without them needing to have open a console view. This is
@@ -657,7 +720,7 @@ def find_hand_root(direction):
         
         raise RuntimeError("Couldn't find hand root. Are you sure you have the right rig type?")
 
-def setup_hand(targetroot):
+def setup_hand(obj, targetroot):
     
     # Takes a root hand bone, calls assemble_hand to get a list of fingers out of it
     # Then runs setup(), damped_track_projectors(), control_drivers(), and add_shrinkwraps()
@@ -665,13 +728,13 @@ def setup_hand(targetroot):
     
     # Needs to run control_drivers after add_shrinkwraps
     
-    fingers_list = assemble_hand(targetroot)
+    fingers_list = assemble_hand(obj, targetroot)
          
     for finger in fingers_list:
         finger.setup()
         finger.damped_track_projectors()
         finger.add_shrinkwraps()
-        control_drivers(finger)
+        control_drivers(obj, finger)
         finger.set_armature_layers()
 
 def _run_api(operator, context, call):
@@ -694,6 +757,16 @@ def _selected_target(context):
         if t != context.active_object:
             return t
     return None
+
+
+class AutoGripFixRolls(bpy.types.Operator):
+    """Fix Bone Rolls for Fingers"""
+    bl_idname = "object.autogrip_fix_rolls"
+    bl_label = "Fix Bone Rolls"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        return _run_api(self, context, lambda api, arm: api.fix_bone_rolls(arm, 'BOTH'))
 
 class AutoGripSetup(bpy.types.Operator):
     """Set up AutoGrip rig"""
@@ -750,15 +823,10 @@ class TargetRight(bpy.types.Operator):
         return _run_api(self, context, lambda api, arm: api.set_target(arm, target, 'R'))
 
 
-def reset_hand(wristroot, reset_pose=True):
+def reset_hand(obj, wristroot, reset_pose=True):
     
-    global obj 
-    obj = bpy.context.active_object
     
-    global activeArmature
-    activeArmature = obj.data
-    
-    fingers_list = assemble_hand(wristroot)
+    fingers_list = assemble_hand(obj, wristroot)
     for f in fingers_list:
         f.reconstruct()
     
@@ -788,7 +856,7 @@ def reset_hand(wristroot, reset_pose=True):
     print('entering edit mode')
     bpy.ops.object.mode_set(mode='EDIT', toggle=False)
     
-    ebs = activeArmature.edit_bones
+    ebs = obj.data.edit_bones
     
     print("deleting projectors")
     for f in fingers_list:
@@ -839,7 +907,7 @@ thumb_presets = {
     'ARP': ('c_thumb1_base.{}', (1.62, 0, -0.3), (1.62, 0, 0.3)),
 }
 
-def apply_thumb_preset(handroot, direction):
+def apply_thumb_preset(obj, handroot, direction):
     
     # Guesses an opposable thumb position for the hand under handroot
     
@@ -870,7 +938,7 @@ def close_hand_fully(direction, thumb=True):
         if 'control' in bone.name:
             bone.rotation_euler[0] = math.pi / 2
     if thumb:
-        apply_thumb_preset(handroot, direction)
+        apply_thumb_preset(obj, handroot, direction)
 
 class QuickPose(bpy.types.Operator):
     """Quickly put all control bones to active position"""
@@ -924,15 +992,13 @@ class guess_rig_type(bpy.types.Operator):
     
     def execute(self, context):
         
-        global obj
         obj = bpy.context.active_object
-        global activeArmature
         activeArmature = bpy.context.active_object.data
         
         print("guessing rig type for", obj.name)
         
-        dictionaries_list = [makehuman_dictionary, rigify_dictionary, autorig_dictionary]
-        type_names_list = ['MHX', 'RFY', 'ARP']
+        dictionaries_list = [makehuman_dictionary, rigify_dictionary, autorig_dictionary, fps_dictionary]
+        type_names_list = ['MHX', 'RFY', 'ARP', 'FPS']
         
         rig_type = None
         
@@ -976,12 +1042,10 @@ class PANEL_PT_Autogrip(bpy.types.Panel):
     #bl_context = "objectmode"
     
     def draw(self, context):
-        global obj
         obj = context.active_object 
         
         layout = self.layout
         
-        global activeArmature
         
         try:
             activeArmature = obj.data
@@ -1043,6 +1107,9 @@ class PANEL_PT_Autogrip(bpy.types.Panel):
                 row = layout.row()
                 row.operator(TargetRight.bl_idname)
                 row.operator(TargetLeft.bl_idname)
+                
+                row = layout.row()
+                row.operator(AutoGripFixRolls.bl_idname)
         else:
             row = layout.row()
             row.label(text = "Active object is not armature.")   
@@ -1058,7 +1125,7 @@ class PANEL_PT_Autogrip(bpy.types.Panel):
 
                        
         
-classes = [AutoGripSetup, AutoGripLeft, AutoGripRight, TargetRight, TargetLeft,
+classes = [AutoGripFixRolls, AutoGripSetup, AutoGripLeft, AutoGripRight, TargetRight, TargetLeft,
     ResetHandLeft, ResetHandRight, QuickPose, PANEL_PT_Autogrip, github_link, guess_rig_type,
     kofi_link]        
         
@@ -1081,11 +1148,9 @@ def register():
         items = [ 
             ('MHX', "MHX", "MakeHuman Exchange"),
             ('RFY', "Rigify", "Modular armature from the Rigify add-on"),
-            ('ARP', "Auto-Rig Pro", "Armature from the Auto-Rig Pro add-on")
-            # Control bones go to the \"AutoGrip Controls\" bone collection, projectors to
-            # the hidden \"AutoGrip Projectors\" one.
-            #('GUESS', "Best Guess", "This will do its best to reconstruct some hands from\n" + 
-            #"any given armature. Not implemented yet"),
+            ('ARP', "Auto-Rig Pro", "Armature from the Auto-Rig Pro add-on"),
+            ('FPS', "FPS Hands", "FPS Hands Rigged"),
+            ('GEN', "Generic", "Auto-detected generic hand")
         ]
     )
 
