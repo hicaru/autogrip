@@ -27,7 +27,7 @@ api = importlib.import_module("bl_ext.user_default.autogrip.api")   # "autogrip.
 api.auto_grip("Armature", "Cup", side="R")
 ```
 
-Main calls: `setup`, `set_target`, `grip` (stops each finger at contact with the target), `release`, `reset`, `status`, `quick_pose`, `auto_grip`. See the docstrings in `api.py` or `skills/blender-autogrip/SKILL.md`.
+Main calls: `setup`, `set_target`, `grip` (stops each finger at contact with the target), `release`, `reset`, `status`, `quick_pose`, `auto_grip`. Two export-hygiene helpers ported from GameRig's engine-export philosophy: `fix_rotation_modes` (quaternion hand bones → XYZ euler, pose preserved) and `bake_and_strip` (bakes the grip pose onto the bare finger bones and removes all AutoGrip machinery, optionally keyframing — the state FBX/glTF exporters like best). See the docstrings in `api.py` or `skills/blender-autogrip/SKILL.md`.
 
 # Tutorial
 

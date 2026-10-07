@@ -566,7 +566,7 @@ def create_single_shrinkwrap(projectorbone):
     newProject.name = prefix + "shrinkwrap"
     
     #setting distance relative to bone length for the moment. Not perfect but it will do
-    newProject.distance = 0.15 * projectorbone.length 
+    newProject.distance = projectorbone.id_data.get(prefix + 'wrap_offset', 0.15) * projectorbone.length
         
 def assemble_hand(obj, handbone):
     
@@ -745,7 +745,7 @@ def control_drivers(obj, finger):
         v.targets[0].id        = obj
         v.targets[0].data_path = 'pose.bones["' + finger.control_bone.name + '"].rotation_euler[0]'
         
-        driver.expression = v.name + " * 0.637"
+        driver.expression = v.name + " * " + repr(obj.data.get(prefix + 'ik_gain', 0.637))
         
     if VERBOSE:
         print("Applying scale drivers")
@@ -761,7 +761,7 @@ def control_drivers(obj, finger):
         v.targets[0].data_path = 'pose.bones["' + finger.control_bone.name + '"].scale[0]'
         
         # Offset stays relative to the projector's length, same as create_single_shrinkwrap
-        scaledriver.expression = v.name + " * " + repr(0.15 * p.length)
+        scaledriver.expression = v.name + " * " + repr(obj.data.get(prefix + 'wrap_offset', 0.15)) + " * " + repr(p.length)
 
 def find_hand_root(obj, direction):
     
@@ -1032,6 +1032,29 @@ def apply_thumb_preset(obj, handroot, direction):
             else:
                 bone.rotation_mode = 'XYZ'
                 bone.rotation_euler = values
+
+def force_euler(obj, wristroot):
+    
+    # GameRig port (utils/bones.py remove_quat_rot_mode, hand-scoped): every bone
+    # AutoGrip or an animator rotates — control bones, phalanges, the thumb root —
+    # is switched from quaternion to XYZ euler while preserving the current pose.
+    # Game engines and FBX/glTF round-trips handle plain euler chains more reliably
+    # than mixed-mode ones, and the wrap/IK solve reads cleaner in the graph editor.
+    
+    fingers_list = assemble_hand(obj, wristroot)
+    converted = []
+    for f in fingers_list:
+        f.reconstruct()  # relink control_bone / projectors the same way api._fingers does
+        posed = list(f.phalanges)
+        if f.control_bone is not None:
+            posed.append(f.control_bone)
+        if 'thumb' in f.name:
+            posed.append(f.palmroot)
+        for bone in posed:
+            if bone is not None and bone.rotation_mode == 'QUATERNION':
+                bone.rotation_mode = 'XYZ'  # Blender converts the pose, values preserved
+                converted.append(bone.name)
+    return converted
 
 def close_hand_fully(obj, direction, thumb=True):
     

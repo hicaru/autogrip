@@ -99,12 +99,18 @@ def status(armature):
     }
 
 
-def setup(armature, side='BOTH', rig_type='AUTO', projector_mirror=False):
+def setup(armature, side='BOTH', rig_type='AUTO', projector_mirror=False, ik_gain=0.637, wrap_offset=0.15):
     """Builds projectors, IK, drivers and control bones. rig_type: 'AUTO', 'MHX', 'RFY',
     'RFY_NO_ORG', 'ARP', 'FPS' or 'GEN'. With side='BOTH' a hand the rig doesn't have is
     skipped instead of failing. projector_mirror=True flips the side of the finger the
     projectors are built on (Finger.offset += math.pi), which flips the direction the
-    fingers bend in — use it when a grip closes backwards over the back of the hand."""
+    fingers bend in — use it when a grip closes backwards over the back of the hand.
+    ik_gain scales how far the fingers fold at control 90 degrees (IK influence per
+    degree): the default 0.637 stops fingers short of a full fist (good for contact on
+    rounded objects); raise it towards 1.0 to wrap tightly around thin bars/cylinders.
+    wrap_offset is the projector shrinkwrap distance as a fraction of projector length:
+    0.15 floats the fingers just off the target surface, ~0.0 makes them hug it, small
+    negative values wrap them deeper around thin grips (fingers may clip — check visually)."""
     arm = _activate(armature)
     if rig_type == 'AUTO':
         rig_type = detect_rig_type(arm)
@@ -113,6 +119,8 @@ def setup(armature, side='BOTH', rig_type='AUTO', projector_mirror=False):
     elif rig_type not in RIG_TYPES:
         raise ValueError("rig_type must be one of {}".format(', '.join(RIG_TYPES)))
     arm.global_rig_choice = rig_type
+    arm.data[hr.prefix + 'ik_gain'] = float(ik_gain)
+    arm.data[hr.prefix + 'wrap_offset'] = float(wrap_offset)
 
     done, skipped = [], {}
     for s in _sides(side):
@@ -144,6 +152,69 @@ def set_target(armature, target, side='BOTH'):
             f.target_shrinkwraps(target)
         arm.data[hr.prefix + 'target_' + s] = target.name
     return {"target": target.name, "sides": sides}
+
+
+def wrap_projectors(armature, side='BOTH', start_deg=55.0, step_deg=65.0,
+                    radius_pad=0.012, axial_pad=0.0):
+    """Wraps the fingers around the current target (call set_target first).
+
+    Repositions each projector onto the target's surface at increasing angles around the
+    target's local Z axis, so the fingers fold around it like a real grip when the control
+    bones close: phalange i aims start_deg + i*step_deg away from its knuckle direction,
+    rotating toward the palm side. The projector shrinkwraps are disabled (they would pull
+    everything back to the nearest surface point and undo the wrap). Intended for
+    bar/cylinder grips: follow up with set_amount(armature, side, 1.0).
+    """
+    from mathutils import Vector, Matrix
+    arm = _activate(armature)
+    wrapped = {}
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        target = bpy.data.objects.get(arm.data.get(hr.prefix + 'target_' + s, ''))
+        if target is None:
+            raise RuntimeError("No target bound for hand {}. Call set_target() first.".format(s))
+        mw = target.matrix_world
+        axis = (mw.to_3x3() @ Vector((0.0, 0.0, 1.0))).normalized()
+        center = mw.translation
+        radius = target.dimensions.x / 2.0 + radius_pad
+        u = axis.cross(Vector((0.0, 0.0, 1.0)))
+        if u.length < 1e-4:
+            u = axis.cross(Vector((1.0, 0.0, 0.0)))
+        u.normalize()
+        w = axis.cross(u).normalized()
+
+        def on_surface(phi, axial):
+            return center + axis * axial + (u * math.cos(phi) + w * math.sin(phi)) * radius
+
+        out = []
+        for f in _fingers(arm, s):
+            palm_ref = arm.matrix_world @ f.palmroot.tail
+            for p in f.projectors:
+                p.constraints[hr.prefix + 'shrinkwrap'].influence = 0.0
+            knuckle = arm.matrix_world @ f.phalanges[0].head
+            radial = knuckle - center
+            radial -= axis * radial.dot(axis)
+            a0 = math.atan2(radial.dot(w), radial.dot(u))
+            # rotate toward the palm: pick the sign that first approaches palm_ref's angle
+            pr = palm_ref - center
+            pr -= axis * pr.dot(axis)
+            a_palm = math.atan2(pr.dot(w), pr.dot(u))
+            d_plus = abs((a0 + math.radians(start_deg)) - a_palm + math.pi) % (2 * math.pi) - math.pi
+            d_minus = abs((a0 - math.radians(start_deg)) - a_palm + math.pi) % (2 * math.pi) - math.pi
+            sign = 1.0 if abs(d_plus) < abs(d_minus) else -1.0
+            for i, p in enumerate(f.projectors):
+                phi = a0 + sign * math.radians(start_deg + i * step_deg)
+                axial = (arm.matrix_world @ p.head - center).dot(axis) + axial_pad
+                goal = on_surface(phi, axial)
+                bpy.context.view_layer.update()
+                p.matrix = Matrix.Translation(goal) @ p.matrix.to_3x3().to_4x4()
+                out.append(p.name)
+        bpy.context.view_layer.update()
+        wrapped[s] = out
+    return wrapped
 
 
 def quick_pose(armature, side='BOTH', thumb=True):
@@ -533,6 +604,76 @@ def set_amount(armature, side='BOTH', amount=1.0):
         set_sides.append(s)
     bpy.context.view_layer.update()
     return {"set": set_sides, "amount": round(amount, 3), "angle_deg": round(math.degrees(angle), 1)}
+
+
+def fix_rotation_modes(armature, side='BOTH'):
+    """Converts every quaternion bone of the hand rig(s) to XYZ euler, pose preserved.
+    Hand-scoped port of GameRig's remove_quat_rot_mode: game engines and
+    FBX/glTF exporters round-trip plain euler chains more reliably than mixed-mode
+    ones. Returns {"sides": [...], "converted": [bone names that were quaternion]}"""
+    arm = _activate(armature)
+    converted, done = [], []
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        converted += hr.force_euler(arm, hr.find_hand_root(arm, s))
+        done.append(s)
+    bpy.context.view_layer.update()
+    return {"sides": done, "converted": converted}
+
+
+def bake_and_strip(armature, side='BOTH', insert_keys=False, to_xyz=False):
+    """Bakes the current grip pose onto the original finger bones and removes ALL
+    AutoGrip machinery (projectors, control bones, IK/shrinkwrap constraints, drivers).
+    GameRig's engine-export philosophy: constraints and helper bones do not survive
+    FBX/glTF export, a static bone pose does. Typical flow: setup -> set_target ->
+    grip -> bake_and_strip -> export.
+    insert_keys=True writes one rotation keyframe per phalange on the current frame;
+    to_xyz=True additionally converts baked bones to XYZ euler (fix_rotation_modes).
+    After this call the hand reads as not set up; re-run setup() to grip again."""
+    arm = _activate(armature)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    baked, strips = {}, []
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        eval_arm = arm.evaluated_get(depsgraph)
+        mats = []
+        for f in _fingers(arm, s):
+            for p in f.phalanges:  # root to tip order: parents bake before children
+                epb = eval_arm.pose.bones.get(p.name)
+                if epb is not None:
+                    mats.append((p.name, epb.matrix.copy()))
+        baked[s] = mats
+        strips.append(s)
+    if not strips:
+        return {"baked": {}, "keyed": 0, "converted": 0, "machinery": "nothing was set up"}
+    for s in strips:  # removes constraints, drivers, projector/control bones; keeps pose basis
+        reset(arm, s, reset_pose=False)
+    bpy.context.view_layer.update()  # re-evaluate WITHOUT constraints before writing back
+    keyed = converted = 0
+    scene = bpy.context.scene
+    for s, mats in baked.items():
+        for name, m in mats:
+            pb = arm.pose.bones.get(name)
+            if pb is None:
+                continue
+            pb.matrix = m  # absolute pose-space matrix, basis absorbs it
+            if to_xyz and pb.rotation_mode == 'QUATERNION':
+                pb.rotation_mode = 'XYZ'
+                converted += 1
+            if insert_keys:
+                path = 'rotation_euler' if len(pb.rotation_mode) == 3 else 'rotation_quaternion'
+                pb.keyframe_insert(data_path=path, frame=scene.frame_current)
+                keyed += 1
+    arm.update_tag()
+    bpy.context.view_layer.update()
+    return {"baked": {s: [n for n, _ in mats] for s, mats in baked.items()},
+            "keyed": keyed, "converted": converted, "machinery": "stripped"}
 
 
 def grip_angles(armature, side='BOTH'):

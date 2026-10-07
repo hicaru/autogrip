@@ -68,6 +68,39 @@ assert not leftovers, leftovers
 assert not [b.name for b in rig.data.bones if b.name.startswith(("projector_", "control_"))]
 assert not any(api.status(rig)["hands"][s]["setup"] for s in "LR")
 
+# --- GameRig ports: fix_rotation_modes + bake_and_strip (engine-export hygiene) ---
+print("SETUP2", api.setup(rig, 'BOTH'))
+print("GRIP2", api.grip(rig, 'L'))
+curl = api.grip_angles(rig, 'L')['L']
+assert curl and any(a > 0 for a in curl.values()), curl
+
+# fix_rotation_modes: quaternion controls are forced back to XYZ, pose preserved
+for f in api._fingers(rig, 'L'):
+    if f.control_bone is not None:
+        f.control_bone.rotation_mode = 'QUATERNION'
+fixed = api.fix_rotation_modes(rig, 'L')
+assert fixed["sides"] == ["L"] and fixed["converted"], fixed
+assert all(f.control_bone.rotation_mode == 'XYZ' for f in api._fingers(rig, 'L'))
+assert any(a > 0 for a in api.grip_angles(rig, 'L')['L'].values()), "pose lost in conversion"
+print("FIXROT", {k: (v if k != 'converted' else len(v)) for k, v in fixed.items()})
+
+# bake_and_strip: the grip pose survives onto bare finger bones, machinery is gone
+baked = api.bake_and_strip(rig, 'L', to_xyz=True)
+assert baked["baked"].get('L'), baked
+assert not api.status(rig)["hands"]["L"]["setup"], "L should be stripped"
+assert api.status(rig)["hands"]["R"]["setup"], "R untouched by L bake"
+defbones = [pb for pb in rig.pose.bones if pb.name.startswith("f_") and pb.name.endswith(".L")]
+assert defbones and all(pb.rotation_mode == 'XYZ' for pb in defbones)
+assert any(any(abs(v) > 1e-4 for v in pb.rotation_euler) for pb in defbones), "pose lost"
+leftovers2 = [(pb.name, c.name) for pb in rig.pose.bones
+              if (pb.name.endswith(".L") or pb.name in ("thumb.L",))
+              for c in pb.constraints if c.name.startswith("AutoGrip_")]
+assert not leftovers2, leftovers2
+assert not [b.name for b in rig.data.bones
+           if b.name.startswith(("projector_", "control_")) and b.name.endswith(".L")]
+print("BAKE", {s: len(v) for s, v in baked["baked"].items()})
+print("RESET2", api.reset(rig))
+
 try:
     api.set_target(rig, ball, 'L')
 except RuntimeError as e:
