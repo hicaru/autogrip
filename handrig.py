@@ -600,7 +600,10 @@ def assemble_hand(obj, handbone):
                 fingername = rootname.split('_')[1]
                 fingername = fingername[:-1]
             else:
-                fingername = bonechain[0].basename
+                if rig_choice == 'GEN':
+                    fingername = bonechain[0].name
+                else:
+                    fingername = bonechain[0].basename
                 
             
             if 'thumb' in fingername:
@@ -705,7 +708,7 @@ def find_hand_root(obj, direction):
                 return obj.pose.bones['hand.l']
         elif rig_choice == 'GEN':
             for pb in obj.pose.bones:
-                if 'hand' in pb.name.lower():
+                if 'hand' in pb.name.lower() and not any(sub in pb.name.lower() for sub in ['ik', 'ctrl', 'cntrl', 'target', 'pole']):
                     if pb.name.endswith(direction) or f"_{direction}" in pb.name or f".{direction}" in pb.name or f" {direction}" in pb.name:
                         return pb
         elif rig_choice == 'FPS':
