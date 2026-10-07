@@ -915,6 +915,8 @@ def apply_thumb_preset(obj, handroot, direction):
     # Guesses an opposable thumb position for the hand under handroot
     
     rig_choice = obj.global_rig_choice
+    if rig_choice not in thumb_presets:
+        return
     name, left, right = thumb_presets[rig_choice]
     if rig_choice == 'ARP':
         name = name.format(direction.lower())
@@ -932,11 +934,11 @@ def apply_thumb_preset(obj, handroot, direction):
                 bone.rotation_mode = 'XYZ'
                 bone.rotation_euler = values
 
-def close_hand_fully(direction, thumb=True):
+def close_hand_fully(obj, direction, thumb=True):
     
     # Quick Pose for one hand: every control bone to 90 degrees, plus the thumb guess
     
-    handroot = find_hand_root(direction)
+    handroot = find_hand_root(obj, direction)
     for bone in handroot.children_recursive:
         if 'control' in bone.name:
             bone.rotation_euler[0] = math.pi / 2

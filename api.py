@@ -134,7 +134,7 @@ def quick_pose(armature, side='BOTH', thumb=True):
     posed = []
     for s in _sides(side):
         if _is_setup(arm, s):
-            hr.close_hand_fully(s, thumb)
+            hr.close_hand_fully(arm, s, thumb)
             posed.append(s)
     return {"posed": posed}
 
