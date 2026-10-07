@@ -1,16 +1,9 @@
 #----------------------------------------------------------
 # File __init__.py
 #----------------------------------------------------------
- 
-#    Addon info
-bl_info = {
-    "name": "Autogrip",
-    "author": "Jetpack Crow",
-    "version": (1, 3, 0),
-    "blender": (5, 2, 0),
-    "location": "View3D > Sidebar > AutoGrip",
-    "description": "Automatically poses hand rigs",
-    "category": '3D View'}
+
+# Extension metadata lives in blender_manifest.toml; a bl_info dict here would
+# make Blender refuse to load the add-on as an extension.
 if "bpy" in locals():
     import importlib
     importlib.reload(handrig)

@@ -14,7 +14,9 @@ from mathutils.bvhtree import BVHTree
 from . import handrig as hr
 
 SIDES = ('L', 'R')
-RIG_TYPES = {'MHX': hr.makehuman_dictionary, 'RFY': hr.rigify_dictionary, 'ARP': hr.autorig_dictionary, 'FPS': hr.fps_dictionary, 'GEN': {}}
+# Checked in order by detect_rig_type; 'GEN' has no required bones, so it matches
+# anything and acts as the fallback. 'RFY_NO_ORG' must stay before 'GEN'.
+RIG_TYPES = {'MHX': hr.makehuman_dictionary, 'RFY': hr.rigify_dictionary, 'ARP': hr.autorig_dictionary, 'FPS': hr.fps_dictionary, 'RFY_NO_ORG': hr.rigify_no_org_dictionary, 'GEN': {}}
 
 
 def _object(ref, kind):
@@ -64,7 +66,9 @@ def _fingers(arm, side):
 
 
 def detect_rig_type(armature):
-    """Returns 'MHX', 'RFY' or 'ARP' if the armature has all that rig's hand bones, else None."""
+    """Returns 'MHX', 'RFY', 'ARP', 'FPS' or 'RFY_NO_ORG' if the armature has all that
+    rig's hand bones, else 'GEN' (the generic fallback — it has no required bones, so
+    it always matches and this never returns None)."""
     arm = _object(armature, 'ARMATURE')
     for name, dictionary in RIG_TYPES.items():
         if all(key in arm.pose.bones for key in dictionary):
@@ -73,27 +77,41 @@ def detect_rig_type(armature):
 
 
 def status(armature):
-    """Rig type, which hands are set up, and their grip targets."""
+    """Rig type, which hands are set up, their grip targets and control bone names.
+    rig_type is None until setup() has run on the armature."""
     arm = _object(armature, 'ARMATURE')
+    configured = any(_is_setup(arm, s) for s in SIDES)
+    hands = {}
+    for s in SIDES:
+        if _is_setup(arm, s):
+            hands[s] = {"setup": True,
+                        "target": arm.data.get(hr.prefix + 'target_' + s),
+                        "control_bones": [f.control_bone.name for f in _fingers(arm, s)]}
+        else:
+            hands[s] = {"setup": False,
+                        "target": arm.data.get(hr.prefix + 'target_' + s),
+                        "control_bones": []}
     return {
         "armature": arm.name,
-        "rig_type": arm.global_rig_choice,
+        "rig_type": arm.global_rig_choice if configured else None,
         "detected_rig_type": detect_rig_type(arm),
-        "hands": {s: {"setup": _is_setup(arm, s), "target": arm.data.get(hr.prefix + 'target_' + s)}
-                  for s in SIDES},
+        "hands": hands,
     }
 
 
-def setup(armature, side='BOTH', rig_type='AUTO'):
-    """Builds projectors, IK, drivers and control bones. rig_type: 'AUTO', 'MHX', 'RFY' or 'ARP'.
-    With side='BOTH' a hand the rig doesn't have is skipped instead of failing."""
+def setup(armature, side='BOTH', rig_type='AUTO', projector_mirror=False):
+    """Builds projectors, IK, drivers and control bones. rig_type: 'AUTO', 'MHX', 'RFY',
+    'RFY_NO_ORG', 'ARP', 'FPS' or 'GEN'. With side='BOTH' a hand the rig doesn't have is
+    skipped instead of failing. projector_mirror=True flips the side of the finger the
+    projectors are built on (Finger.offset += math.pi), which flips the direction the
+    fingers bend in — use it when a grip closes backwards over the back of the hand."""
     arm = _activate(armature)
     if rig_type == 'AUTO':
         rig_type = detect_rig_type(arm)
         if rig_type is None:
-            raise RuntimeError("Rig type not recognised. Pass rig_type='MHX', 'RFY' or 'ARP' explicitly.")
+            raise RuntimeError("Rig type not recognised. Pass rig_type='MHX', 'RFY', 'ARP', 'FPS' or 'GEN' explicitly.")
     elif rig_type not in RIG_TYPES:
-        raise ValueError("rig_type must be AUTO, MHX, RFY or ARP")
+        raise ValueError("rig_type must be one of {}".format(', '.join(RIG_TYPES)))
     arm.global_rig_choice = rig_type
 
     done, skipped = [], {}
@@ -102,7 +120,7 @@ def setup(armature, side='BOTH', rig_type='AUTO'):
             skipped[s] = "already set up"
             continue
         try:
-            hr.setup_hand(arm, hr.find_hand_root(arm, s))
+            hr.setup_hand(arm, hr.find_hand_root(arm, s), projector_mirror)
         except RuntimeError as e:
             if side.upper() != 'BOTH':
                 raise
@@ -149,11 +167,25 @@ def _touching(arm, finger, bvh, to_local, scale, tolerance):
     return False
 
 
+def _inside_bvh(bvh, to_local, world_point):
+    # True when a world-space point lies inside the target mesh (its closest surface
+    # normal points away from the point)
+    p = to_local @ world_point
+    location, normal, _, _ = bvh.find_nearest(p)
+    if location is None:
+        return False
+    return (p - location).dot(normal) < 0.0
+
+
 def grip(armature, side='BOTH', amount=1.0, contact=True, thumb=True, tolerance=0.35, steps=24):
     """Closes the fingers. amount 0..1 scales the maximum curl (1 = 90 degrees).
     With contact=True each finger stops as soon as a phalange tip reaches the target surface,
     so it doesn't over-close. tolerance is the contact distance as a fraction of phalange length.
-    Returns each finger's final angle in degrees and whether it touched."""
+    Returns each finger's final angle in degrees, whether it touched, and penetrated_rest
+    (True when the finger was already inside the target before closing — move the target,
+    it is badly placed). The per-hand dict also carries projector_side: -1 when the
+    projectors sit on the palm side, 1 on the back-of-hand side (sign of the average
+    projector-head minus phalange-head delta Z in world space)."""
     arm = _activate(armature)
     amount = max(0.0, min(1.0, amount))
     max_angle = math.pi / 2 * amount
@@ -174,6 +206,22 @@ def grip(armature, side='BOTH', amount=1.0, contact=True, thumb=True, tolerance=
             scale = target.matrix_world.to_scale()[0]
 
         fingers = _fingers(arm, s)
+
+        # Fingers already inside the target before any closing: the contact logic
+        # would stop them instantly at tiny angles, so flag the bad target placement
+        rest_penetration = {}
+        if bvh is not None:
+            for f in fingers:
+                rest_penetration[f.name] = any(
+                    _inside_bvh(bvh, to_local, arm.matrix_world @ pb.tail)
+                    for pb in f.phalanges)
+
+        # Side of the phalanges the projectors sit on (same measurement as the
+        # session report's proj_delta_z): -1 = palm side, 1 = back of hand
+        proj_deltas = [(arm.matrix_world @ f.projectors[0].head).z - (arm.matrix_world @ f.phalanges[0].head).z
+                       for f in fingers if f.projectors]
+        projector_side = -1 if (proj_deltas and sum(proj_deltas) / len(proj_deltas) < 0) else 1
+
         if thumb:
             hr.apply_thumb_preset(arm, hr.find_hand_root(arm, s), s)
         out = {}
@@ -189,8 +237,10 @@ def grip(armature, side='BOTH', amount=1.0, contact=True, thumb=True, tolerance=
                         angle, touched = cb.rotation_euler[0], True
                         break
             cb.rotation_euler[0] = angle
-            out[f.name] = {"angle_deg": round(math.degrees(angle), 1), "touched": touched}
+            out[f.name] = {"angle_deg": round(math.degrees(angle), 1), "touched": touched,
+                           "penetrated_rest": rest_penetration.get(f.name, False)}
         bpy.context.view_layer.update()
+        out["projector_side"] = projector_side
         result[s] = out
     return result
 
@@ -272,3 +322,325 @@ def reset(armature, side='BOTH', reset_pose=True):
             del arm.data[hr.prefix + 'target_' + s]
         cleared.append(s)
     return {"reset": cleared}
+
+
+def contact_sheet(frames=None, out=None, camera=None, columns=0, cell=(480, 360), engine='BLENDER_WORKBENCH', max_cells=24, focus=None, margin=1.5, orbit_deg=0):
+    """Renders the given frames and composites them into a single PNG (contact sheet),
+    so a whole animation can be verified from one image.
+
+    frames: list of frame numbers, or a (start, end, step) tuple; default = scene range, thinned to max_cells.
+    out: output PNG path; default 'autogrip_contact_sheet.png' next to the blend file.
+    camera: camera object/name to render from; None = scene.camera (or a temp camera if the scene has none);
+    'AUTO' = always build a temp camera framed on the focus bbox.
+    focus: object/name to frame the temp camera on; default = all non-AutoGrip meshes.
+    columns: grid columns; 0 = automatic (ceil(sqrt(n))).
+    cell: (width, height) of one frame in pixels.
+    engine: render engine override; BLENDER_WORKBENCH is fast and shows contact clearly.
+    margin: camera distance multiplier over the fitted distance.
+    orbit_deg: if nonzero and a temp camera is used, the camera orbits the focus by orbit_deg per cell,
+    so every cell shows the grip from a different side.
+    Returns {'out': path, 'grid': [cols, rows], 'frames': [...], 'engine': engine, 'render_log': [...]}."""
+    import bpy
+    import math
+    import os
+    import shutil
+    import tempfile
+
+    import numpy as np
+    from mathutils import Vector
+
+    scene = bpy.context.scene
+
+    if frames is None:
+        frames = list(range(scene.frame_start, scene.frame_end + 1))
+        step = max(1, math.ceil(len(frames) / float(max_cells)))
+        frames = frames[::step]
+    elif len(frames) == 3 and all(isinstance(v, int) for v in frames):
+        frames = list(range(frames[0], frames[1] + 1, frames[2]))
+    if len(frames) > max_cells:
+        step = math.ceil(len(frames) / float(max_cells))
+        frames = frames[::step]
+    if not frames:
+        raise ValueError('No frames to render')
+
+    # Camera: explicit > scene.camera > temp camera framed on the focus bbox.
+    cam_obj = None
+    center = None
+    if camera is not None and camera != 'AUTO':
+        cam_obj = _object(camera, 'CAMERA')
+        if cam_obj is None:
+            raise ValueError('Camera not found: {}'.format(camera))
+        scene.camera = cam_obj
+    if scene.camera is None or (camera == 'AUTO' and camera is not None):
+        if focus is not None:
+            focus_obj = _object(focus, 'MESH')
+            if focus_obj is None:
+                raise ValueError('Focus object not found: {}'.format(focus))
+            objs = [focus_obj]
+        else:
+            objs = [o for o in scene.objects if o.type == 'MESH' and not o.name.startswith(hr.prefix)]
+        if not objs:
+            raise RuntimeError('No camera in the scene and no meshes to frame')
+        mn = Vector((1e9, 1e9, 1e9))
+        mx = Vector((-1e9, -1e9, -1e9))
+        for o in objs:
+            for c in o.bound_box:
+                w = o.matrix_world @ Vector(c)
+                mn = Vector((min(mn.x, w.x), min(mn.y, w.y), min(mn.z, w.z)))
+                mx = Vector((max(mx.x, w.x), max(mx.y, w.y), max(mx.z, w.z)))
+        center = (mn + mx) / 2
+        size = max((mx - mn).length, 0.1)
+        tmp_cam_data = bpy.data.cameras.new(hr.prefix + 'sheet_cam')
+        cam_obj = bpy.data.objects.new(hr.prefix + 'sheet_cam', tmp_cam_data)
+        scene.collection.objects.link(cam_obj)
+        direction = Vector((1.0, -1.0, 0.6)).normalized()
+        # fit distance from the camera's horizontal field of view
+        lens = tmp_cam_data.lens
+        half_fov = math.atan(tmp_cam_data.sensor_width / (2.0 * lens))
+        distance = (size / 2.0) / math.tan(half_fov) * max(margin, 0.5)
+        cam_obj.location = center + direction * distance
+        tmp_target = bpy.data.objects.new(hr.prefix + 'sheet_target', None)
+        scene.collection.objects.link(tmp_target)
+        tmp_target.location = center
+        track = cam_obj.constraints.new('TRACK_TO')
+        track.target = tmp_target
+        track.track_axis = 'TRACK_NEGATIVE_Z'
+        track.up_axis = 'UP_Y'
+        scene.camera = cam_obj
+
+    w, h = cell
+    old = (scene.render.engine, scene.render.resolution_x, scene.render.resolution_y,
+           scene.render.resolution_percentage, scene.render.filepath)
+    tmpdir = tempfile.mkdtemp(prefix='autogrip_sheet_')
+    sheet_img = None
+    try:
+        scene.render.engine = engine
+        scene.render.resolution_x = w
+        scene.render.resolution_y = h
+        scene.render.resolution_percentage = 100
+        paths = []
+        render_log = []
+        orbit_center = center.copy() if center is not None else None
+        orbit_base = (cam_obj.location - orbit_center).copy() if orbit_center is not None else None
+        arr = np.empty(w * h * 4, dtype=np.float32)
+        scene.frame_set(frames[0])
+        scene.render.filepath = os.path.join(tmpdir, 'warmup.png')
+        bpy.ops.render.render(write_still=True)  # warmup: first workbench render can come out black
+        for i, f in enumerate(frames):
+            scene.frame_set(f)
+            if orbit_deg and orbit_base is not None and cam_obj.name.startswith(hr.prefix):
+                from mathutils import Matrix
+                ang = math.radians(orbit_deg) * i
+                cam_obj.location = orbit_center + Matrix.Rotation(ang, 4, 'Z') @ orbit_base
+            p = os.path.join(tmpdir, 'f%04d.png' % f)
+            scene.render.filepath = p
+            for attempt in range(4):
+                import time
+                time.sleep(0.05)
+                bpy.ops.render.render(write_still=True)
+                img = bpy.data.images.load(p)
+                img.pixels.foreach_get(arr)
+                bright = round(float(arr.max()), 3)
+                ok = bright > 0.05
+                bpy.data.images.remove(img)
+                render_log.append({'frame': f, 'attempt': attempt + 1, 'max': bright, 'ok': ok})
+                if ok:
+                    break
+            paths.append(p)
+        cols = columns if columns else int(math.ceil(math.sqrt(len(frames))))
+        rows = int(math.ceil(len(frames) / float(cols)))
+        arr = np.empty(w * h * 4, dtype=np.float32)
+
+        def composite():
+            canvas = np.ones((rows * h, cols * w, 4), dtype=np.float32)
+            canvas[..., :3] = 0.08
+            means = []
+            for i, p in enumerate(paths):
+                img = bpy.data.images.load(p)
+                img.pixels.foreach_get(arr)
+                c, r = i % cols, i // cols
+                canvas[r * h:(r + 1) * h, c * w:(c + 1) * w, :] = arr.reshape(h, w, 4)
+                bpy.data.images.remove(img)
+                means.append(round(float(arr.mean()), 3))
+            return canvas, means
+
+        canvas, cell_means = composite()
+        # self-heal: re-render any cell that came out black and recomposite
+        for round_ in range(3):
+            bad = [i for i, m in enumerate(cell_means) if m < 0.05]
+            if not bad:
+                break
+            for i in bad:
+                f = frames[i]
+                scene.frame_set(f)
+                scene.render.filepath = paths[i]
+                bpy.ops.render.render(write_still=True)
+            canvas, cell_means = composite()
+        out = out or os.path.join(os.path.dirname(bpy.data.filepath) or tempfile.gettempdir(),
+                                  'autogrip_contact_sheet.png')
+        sheet_img = bpy.data.images.new(hr.prefix + 'contact_sheet', cols * w, rows * h, alpha=False)
+        sheet_img.pixels.foreach_set(canvas[::-1, :, :].ravel())  # flip: blender rows are bottom-up
+        sheet_img.filepath_raw = out
+        sheet_img.file_format = 'PNG'
+        sheet_img.save()
+    finally:
+        scene.render.engine, scene.render.resolution_x, scene.render.resolution_y, \
+            scene.render.resolution_percentage, scene.render.filepath = old
+        if sheet_img is not None:
+            bpy.data.images.remove(sheet_img)
+        if camera == 'AUTO' and cam_obj is not None and cam_obj.name.startswith(hr.prefix):
+            scene.camera = None
+            data = cam_obj.data
+            tgt = cam_obj.constraints[0].target if cam_obj.constraints else None
+            bpy.data.objects.remove(cam_obj, do_unlink=True)
+            if data:
+                bpy.data.cameras.remove(data)
+            if tgt:
+                bpy.data.objects.remove(tgt, do_unlink=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return {'out': out, 'grid': [cols, rows], 'frames': list(frames), 'engine': engine, 'render_log': render_log, 'cell_means': cell_means}
+
+
+def _control_angle_deg(cb):
+    # Current local X rotation of a control bone, in degrees, whatever its rotation mode
+    rot = cb.rotation_euler if cb.rotation_mode == 'XYZ' else cb.rotation_quaternion.to_euler('XYZ')
+    return round(math.degrees(rot[0]), 1)
+
+
+def _hand_controls(arm, s):
+    # Control bones of one set-up hand, with XYZ euler mode forced (drivers expect it)
+    fingers = _fingers(arm, s)
+    for f in fingers:
+        f.control_bone.rotation_mode = 'XYZ'
+    return fingers
+
+
+def set_amount(armature, side='BOTH', amount=1.0):
+    """Sets every control bone's local X rotation at once: amount 0..1 maps to 0..90
+    degrees (the rotation limit the drivers were built with). No contact checks —
+    this is the primitive quick_pose, grip and animate_grip are built on."""
+    arm = _activate(armature)
+    amount = max(0.0, min(1.0, amount))
+    angle = math.pi / 2 * amount
+    set_sides = []
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        for f in _hand_controls(arm, s):
+            f.control_bone.rotation_euler[0] = angle
+        set_sides.append(s)
+    bpy.context.view_layer.update()
+    return {"set": set_sides, "amount": round(amount, 3), "angle_deg": round(math.degrees(angle), 1)}
+
+
+def grip_angles(armature, side='BOTH'):
+    """Current curl angle in degrees of every control bone of the hand(s):
+    {side: {finger: angle_deg}}."""
+    arm = _object(armature, 'ARMATURE')
+    result = {}
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        result[s] = {f.name: _control_angle_deg(f.control_bone) for f in _fingers(arm, s)}
+    return result
+
+
+def animate_grip(armature, side='BOTH', closed_frames=(), open_frames=(), amount=1.0):
+    """Keyframes a squeeze/release cycle on the control bones; the IK drivers move the
+    phalanges automatically. closed_frames: frames the hand is closed (control bones at
+    amount, default 1.0 = 90 degrees). open_frames: frames the hand is open (0 degrees).
+    A frame in both counts as closed. Sets rotation_euler[0] keyframes on every control
+    bone, e.g. animate_grip(arm, 'R', closed_frames=(13, 37, 61), open_frames=(1, 25, 49))."""
+    arm = _activate(armature)
+    amount = max(0.0, min(1.0, amount))
+    closed = list(closed_frames)
+    opened = [fr for fr in open_frames if fr not in closed]
+    scene = bpy.context.scene
+    current = scene.frame_current
+    keyed = []
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        fingers = _hand_controls(arm, s)
+        for frame in sorted(set(closed) | set(opened)):
+            angle = math.pi / 2 * amount if frame in closed else 0.0
+            for f in fingers:
+                cb = f.control_bone
+                cb.rotation_euler[0] = angle
+                cb.keyframe_insert(data_path='rotation_euler', index=0, frame=frame)
+        keyed.append(s)
+    scene.frame_set(current)
+    return {"keyed": keyed, "closed_frames": closed, "open_frames": opened,
+            "amount": round(amount, 3)}
+
+
+def _finger_collides(arm, finger, target, to_world, to_local, depsgraph, tolerance):
+    # True when any sampled point along the finger's phalanges (head/mid/tail of each)
+    # is inside the target mesh or within tolerance world units of its surface
+    for pb in finger.phalanges:
+        head, tail = arm.matrix_world @ pb.head, arm.matrix_world @ pb.tail
+        for t in (0.0, 0.5, 1.0):
+            p = head.lerp(tail, t)
+            # closest_point_on_mesh works in object space, so query in target-local
+            result, location, normal, _ = target.closest_point_on_mesh(
+                to_local @ p, depsgraph=depsgraph)
+            if not result:
+                continue
+            delta = p - to_world @ location
+            normal_world = (to_world.to_3x3() @ normal).normalized()
+            if delta.dot(normal_world) < 0.0 or delta.length <= tolerance:
+                return True
+    return False
+
+
+def find_finger_limits(armature, side='BOTH', target=None, step=5.0, tolerance=0.0):
+    """Finds each finger's maximum curl angle before it collides with the target mesh.
+    Sweeps all control bones together from 0 to 90 degrees in `step` degree steps and
+    tests sampled points along every phalange against the target with
+    closest_point_on_mesh(); a finger stops at the last angle that did not collide.
+    tolerance: extra contact distance in world units — the test runs on the finger
+    bones' centerline, so use roughly the skin/finger half-thickness (0.01-0.03 for
+    human-scale hands) to stand in for the flesh. Returns {side: {finger: max_angle_deg}}
+    and leaves the hand posed at those limits. A finger already colliding at 0 gets 0."""
+    arm = _activate(armature)
+    target = _object(target, 'MESH')
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    to_local = target.matrix_world.inverted()
+    to_world = target.matrix_world
+
+    result = {}
+    for s in _sides(side):
+        if not _is_setup(arm, s):
+            if side.upper() != 'BOTH':
+                raise RuntimeError("Hand {} is not set up. Call setup() first.".format(s))
+            continue
+        fingers = _hand_controls(arm, s)
+        limits = {f.name: 90.0 for f in fingers}
+        blocked = set()
+        angles = [0.0]
+        a = step
+        while a < 90.0:
+            angles.append(a)
+            a += step
+        angles.append(90.0)
+        prev_deg = 0.0
+        for deg in angles:
+            for f in fingers:
+                if f.name in blocked:
+                    f.control_bone.rotation_euler[0] = math.radians(limits[f.name])
+                else:
+                    f.control_bone.rotation_euler[0] = math.radians(deg)
+            bpy.context.view_layer.update()
+            for f in fingers:
+                if f.name not in blocked and _finger_collides(arm, f, target, to_world, to_local, depsgraph, tolerance):
+                    limits[f.name] = prev_deg
+                    blocked.add(f.name)
+            prev_deg = deg
+        result[s] = limits
+    return result
